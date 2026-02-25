@@ -1,6 +1,6 @@
 #!/bin/bash
 # WORKER - tmux session manager for NABU
-# Attaches to or creates a persistent tmux session
+# Attaches to existing 'nabu' tmux session or creates a new one
 
 SESSION_NAME="nabu"
 

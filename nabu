@@ -1,157 +1,192 @@
 #!/bin/bash
-# NABU - CLI for Claude Chat Service
-# Talks to claude-chat-service (POST /chat) with session continuity
+# NABU - CLI Wrapper for Home Assistant Conversation Agent Testing
 # Usage: nabu "your message"
+# Example: nabu "Hi was geht?"
 
 set -euo pipefail
 
+# Load config
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONFIG_FILE="${NABU_CONFIG:-$SCRIPT_DIR/config}"
 
 if [ ! -f "$CONFIG_FILE" ]; then
     echo "Error: config file not found at $CONFIG_FILE"
-    echo "Run setup.sh first, or copy config.example to config."
+    echo "Run setup.sh first, or copy config.example to config and fill in your values."
     exit 1
 fi
 
 # shellcheck source=config.example
 source "$CONFIG_FILE"
 
-SESSION_FILE="$SCRIPT_DIR/.nabu_session_id"
-
-# Colors
-if [ -t 1 ]; then
-    RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
-    BLUE='\033[0;34m'; CYAN='\033[0;36m'; NC='\033[0m'; BOLD='\033[1m'
+# Conversation ID file location — same logic as original
+if [ -w "/config" ]; then
+    CONVERSATION_FILE="/config/.nabu_conversation_id"
+elif [ -w "/var/lib/docker/volumes/homeassistant_data/_data" ]; then
+    CONVERSATION_FILE="/var/lib/docker/volumes/homeassistant_data/_data/.nabu_conversation_id"
 else
-    RED=''; GREEN=''; YELLOW=''; BLUE=''; CYAN=''; NC=''; BOLD=''
+    CONVERSATION_FILE="$SCRIPT_DIR/.nabu_conversation_id"
+fi
+
+# If config provides a conversation ID, seed the file
+if [ -n "${CONVERSATION_ID:-}" ] && [ ! -f "$CONVERSATION_FILE" ]; then
+    echo "$CONVERSATION_ID" > "$CONVERSATION_FILE"
+fi
+
+# Colors (if terminal supports it)
+if [ -t 1 ]; then
+    RED='\033[0;31m'
+    GREEN='\033[0;32m'
+    YELLOW='\033[1;33m'
+    BLUE='\033[0;34m'
+    MAGENTA='\033[0;35m'
+    CYAN='\033[0;36m'
+    NC='\033[0m'
+    BOLD='\033[1m'
+else
+    RED=''; GREEN=''; YELLOW=''; BLUE=''; MAGENTA=''; CYAN=''; NC=''; BOLD=''
 fi
 
 show_usage() {
     cat << EOF
-${BOLD}NABU - Claude Chat Service CLI${NC}
+${BOLD}NABU - Home Assistant Conversation Agent CLI${NC}
 
 ${BOLD}Usage:${NC}
-  nabu "message"              Send message to Claude
-  nabu --reset                Clear local session (start fresh)
-  nabu --session              Show current session ID
-  nabu --health               Check service health
+  nabu "message"              Send message to conversation agent
+  nabu --reset                Reset conversation (start new)
+  nabu --show-id              Show current conversation ID
+  nabu --logs                 Show recent conversation logs
   nabu --help                 Show this help
 
+${BOLD}Examples:${NC}
+  nabu "Hi was geht?"
+  nabu "check my automations"
+  nabu "turn on the lights"
+  nabu "wann kommt die 10?"
+
 ${BOLD}Options:${NC}
-  --verbose                   Show full JSON response
+  --lang LANG                 Set language (default: ${DEFAULT_LANGUAGE})
+  --reset                     Start new conversation
+  --show-id                   Display conversation ID
+  --logs                      Show recent logs
+  --verbose                   Show full API response
   --help                      Show this help
 
-${BOLD}Config:${NC}
-  ${CONFIG_FILE}
-  Service URL: ${CLAUDE_CHAT_URL}
+${BOLD}Configuration:${NC}
+  HA URL:          ${HA_URL}
+  Agent ID:        ${AGENT_ID}
+  Conversation ID: ${CONVERSATION_FILE}
+  Language:        ${DEFAULT_LANGUAGE}
 
 EOF
 }
 
-get_session_id() {
-    # Priority: config SESSION_ID > local session file
-    if [ -n "${SESSION_ID:-}" ]; then
-        echo "$SESSION_ID"
-    elif [ -f "$SESSION_FILE" ]; then
-        cat "$SESSION_FILE"
+get_conversation_id() {
+    if [ -f "$CONVERSATION_FILE" ]; then
+        cat "$CONVERSATION_FILE"
     else
-        echo ""
+        local new_id="01ARZ3NDEKTSV4RRFFQ69G5FAV"
+        echo "$new_id" > "$CONVERSATION_FILE"
+        echo "$new_id"
     fi
 }
 
-save_session_id() {
-    echo "$1" > "$SESSION_FILE"
-}
-
-reset_session() {
-    if [ -f "$SESSION_FILE" ]; then
-        rm "$SESSION_FILE"
-        echo -e "${GREEN}✓${NC} Session cleared."
+reset_conversation() {
+    if [ -f "$CONVERSATION_FILE" ]; then
+        rm "$CONVERSATION_FILE"
+        echo -e "${GREEN}✓${NC} Conversation reset. New conversation will start on next message."
     else
-        echo -e "${YELLOW}⚠${NC}  No local session to clear."
+        echo -e "${YELLOW}⚠${NC}  No active conversation to reset."
     fi
 }
 
-show_session() {
-    local sid
-    sid=$(get_session_id)
-    if [ -n "$sid" ]; then
-        echo -e "${CYAN}Session ID:${NC} ${BOLD}${sid}${NC}"
-    else
-        echo -e "${YELLOW}No active session.${NC} Next message will start a new one."
+show_conversation_id() {
+    local conv_id
+    conv_id=$(get_conversation_id)
+    echo -e "${CYAN}Current Conversation ID:${NC} ${BOLD}${conv_id}${NC}"
+    if [ -f "$CONVERSATION_FILE" ]; then
+        local created
+        created=$(stat -c %y "$CONVERSATION_FILE" 2>/dev/null || stat -f "%Sm" "$CONVERSATION_FILE" 2>/dev/null)
+        echo -e "${CYAN}Started:${NC} ${created}"
     fi
 }
 
-check_health() {
-    echo -e "${CYAN}Checking ${CLAUDE_CHAT_URL}/health ...${NC}"
-    local resp
-    resp=$(curl -sf "${CLAUDE_CHAT_URL}/health" 2>&1) || {
-        echo -e "${RED}✗ Service unreachable${NC}"
-        exit 1
-    }
-    echo "$resp" | python3 -m json.tool 2>/dev/null || echo "$resp"
+show_logs() {
+    echo -e "${CYAN}Recent conversation logs (last 50 lines):${NC}\n"
+    tail -50 /config/home-assistant.log | grep -E "Message.*user|Message.*assistant|COORDINATOR|EXECUTOR|PERSONALITY|claude_code" --color=always || echo "No recent conversation logs found."
 }
 
 send_message() {
     local message="$1"
-    local verbose="${2:-false}"
+    local language="${2:-$DEFAULT_LANGUAGE}"
+    local verbose="${3:-false}"
 
-    local sid
-    sid=$(get_session_id)
+    local conv_id
+    conv_id=$(get_conversation_id)
 
-    # Build payload
     local payload
-    payload=$(python3 -c "import json,sys; print(json.dumps({'prompt': sys.argv[1]}))" "$message")
+    payload=$(cat <<EOF
+{
+  "text": "$message",
+  "language": "$language",
+  "agent_id": "$AGENT_ID",
+  "conversation_id": "$conv_id"
+}
+EOF
+)
 
     echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo -e "${CYAN}You:${NC} ${BOLD}${message}${NC}"
-    if [ -n "$sid" ]; then
-        echo -e "${CYAN}Session:${NC} ${sid}"
-    fi
     echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 
     local response
-    response=$(curl -s -X POST "${CLAUDE_CHAT_URL}/chat" \
+    response=$(curl -s -X POST "${HA_URL}/api/conversation/process" \
+        -H "Authorization: Bearer ${HA_TOKEN}" \
         -H "Content-Type: application/json" \
-        -d "$payload") || {
-        echo -e "${RED}✗ Failed to reach service at ${CLAUDE_CHAT_URL}${NC}"
-        exit 1
-    }
+        -d "$payload")
+
+    if echo "$response" | grep -q '"error"'; then
+        echo -e "${RED}✗ Error:${NC}"
+        echo "$response" | python3 -m json.tool 2>/dev/null || echo "$response"
+        return 1
+    fi
+
+    local response_text
+    response_text=$(echo "$response" | python3 -c "import sys, json; data=json.load(sys.stdin); print(data.get('response', {}).get('speech', {}).get('plain', {}).get('speech', 'No response'))" 2>/dev/null)
 
     if [ "$verbose" = "true" ]; then
+        echo -e "\n${MAGENTA}Full API Response:${NC}"
         echo "$response" | python3 -m json.tool 2>/dev/null || echo "$response"
         echo ""
     fi
 
-    local response_text new_sid
-    response_text=$(echo "$response" | python3 -c \
-        "import sys,json; d=json.load(sys.stdin); print(d.get('response','(no response)'))" 2>/dev/null)
-    new_sid=$(echo "$response" | python3 -c \
-        "import sys,json; d=json.load(sys.stdin); print(d.get('session_id',''))" 2>/dev/null)
+    echo -e "${GREEN}Nabu:${NC} ${response_text}"
 
-    echo -e "${GREEN}Claude:${NC} ${response_text}"
+    local response_type new_conv_id
+    response_type=$(echo "$response" | python3 -c "import sys, json; data=json.load(sys.stdin); print(data.get('response', {}).get('response_type', 'unknown'))" 2>/dev/null)
+    new_conv_id=$(echo "$response" | python3 -c "import sys, json; data=json.load(sys.stdin); print(data.get('conversation_id', ''))" 2>/dev/null)
+
     echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-
-    if [ -n "$new_sid" ]; then
-        save_session_id "$new_sid"
-        if [ "$new_sid" != "$sid" ]; then
-            echo -e "${CYAN}Session:${NC} ${new_sid} (saved)"
-        fi
-    fi
+    echo -e "${CYAN}Type:${NC} ${response_type} ${CYAN}| Conversation ID:${NC} ${new_conv_id}"
+    echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 }
 
 main() {
-    local message="" verbose=false
+    local message=""
+    local language="$DEFAULT_LANGUAGE"
+    local verbose=false
 
     while [[ $# -gt 0 ]]; do
         case $1 in
-            --help|-h)    show_usage; exit 0 ;;
-            --reset)      reset_session; exit 0 ;;
-            --session)    show_session; exit 0 ;;
-            --health)     check_health; exit 0 ;;
+            --help|-h)   show_usage; exit 0 ;;
+            --reset)     reset_conversation; exit 0 ;;
+            --show-id)   show_conversation_id; exit 0 ;;
+            --logs)      show_logs; exit 0 ;;
+            --lang)      language="$2"; shift 2 ;;
             --verbose|-v) verbose=true; shift ;;
-            *)            message="${message:+$message }$1"; shift ;;
+            *)
+                if [ -z "$message" ]; then message="$1"
+                else message="$message $1"; fi
+                shift ;;
         esac
     done
 
@@ -162,7 +197,7 @@ main() {
         exit 1
     fi
 
-    send_message "$message" "$verbose"
+    send_message "$message" "$language" "$verbose"
 }
 
 main "$@"

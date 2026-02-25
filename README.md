@@ -1,11 +1,11 @@
 # nabu-cli
 
-CLI for interacting with [claude-chat-service](https://github.com/NG-Bullseye/claude-chat-service) — a persistent Claude Code session over HTTP.
+CLI for the Home Assistant Conversation Agent — send messages, maintain conversation context, view logs.
 
 ## Tools
 
-- **`nabu`** — Send messages to Claude, maintains session continuity
-- **`worker`** — tmux session manager
+- **`nabu`** — Talk to the HA conversation agent from the terminal
+- **`worker`** — Attach to / create a persistent tmux session named `nabu`
 
 ## Setup
 
@@ -16,12 +16,15 @@ bash setup.sh
 ```
 
 `setup.sh` asks for:
-- **Claude Chat Service URL** (e.g. `http://192.168.1.225:8765`)
-- **Session ID** (optional — for continuing an existing Claude conversation)
+- Home Assistant URL
+- Long-lived Access Token
+- Conversation Agent ID
+- Default language
+- Conversation ID (optional — to continue an existing session)
 
-Get the current session ID from a running service:
+Get the current conversation ID on the HA host:
 ```bash
-curl http://<host>:8765/health
+nabu --show-id
 ```
 
 Credentials stay in a local `config` file (git-ignored).
@@ -29,17 +32,18 @@ Credentials stay in a local `config` file (git-ignored).
 ## Usage
 
 ```bash
-nabu "Hallo Claude"
-nabu --health       # check service connectivity
-nabu --session      # show current session ID
-nabu --reset        # clear session (start fresh)
-nabu --verbose      # show full JSON response
+nabu "Hi was geht?"
+nabu "turn on the lights"
+nabu --reset              # start new conversation
+nabu --show-id            # show current conversation ID
+nabu --logs               # tail HA log filtered to conversation lines
+nabu --lang en "Hello"
+nabu --verbose "test"     # show full API response
 
-nabu-worker         # attach/create tmux session
+worker                    # attach to / create tmux session 'nabu'
 ```
 
 ## Requirements
 
 - `bash`, `curl`, `python3`
-- `tmux` (for `nabu-worker`)
-- Running [claude-chat-service](https://github.com/NG-Bullseye/claude-chat-service)
+- `tmux` (for `worker`)
