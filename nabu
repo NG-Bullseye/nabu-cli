@@ -1,0 +1,179 @@
+#!/bin/bash
+# NABU - CLI Wrapper for Home Assistant Conversation Agent Testing
+# Usage: nabu "your message"
+# Example: nabu "Hi was geht?"
+
+set -euo pipefail
+
+# Locate config file
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CONFIG_FILE="${NABU_CONFIG:-$SCRIPT_DIR/config}"
+
+if [ ! -f "$CONFIG_FILE" ]; then
+    echo "Error: config file not found at $CONFIG_FILE"
+    echo "Run setup.sh first, or copy config.example to config and fill in your values."
+    exit 1
+fi
+
+# shellcheck source=config.example
+source "$CONFIG_FILE"
+
+# Conversation ID storage
+if [ -w "/config" ]; then
+    CONVERSATION_FILE="/config/.nabu_conversation_id"
+elif [ -w "/var/lib/docker/volumes/homeassistant_data/_data" ]; then
+    CONVERSATION_FILE="/var/lib/docker/volumes/homeassistant_data/_data/.nabu_conversation_id"
+else
+    CONVERSATION_FILE="$SCRIPT_DIR/.nabu_conversation_id"
+fi
+
+# Colors
+if [ -t 1 ]; then
+    RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
+    BLUE='\033[0;34m'; MAGENTA='\033[0;35m'; CYAN='\033[0;36m'
+    NC='\033[0m'; BOLD='\033[1m'
+else
+    RED=''; GREEN=''; YELLOW=''; BLUE=''; MAGENTA=''; CYAN=''; NC=''; BOLD=''
+fi
+
+show_usage() {
+    cat << EOF
+${BOLD}NABU - Home Assistant Conversation Agent CLI${NC}
+
+${BOLD}Usage:${NC}
+  nabu "message"              Send message to conversation agent
+  nabu --reset                Reset conversation (start new)
+  nabu --show-id              Show current conversation ID
+  nabu --help                 Show this help
+
+${BOLD}Examples:${NC}
+  nabu "Hi was geht?"
+  nabu "turn on the lights"
+  nabu "wann kommt die 10?"
+
+${BOLD}Options:${NC}
+  --lang LANG                 Set language (default: ${DEFAULT_LANGUAGE})
+  --reset                     Start new conversation
+  --show-id                   Display conversation ID
+  --verbose                   Show full API response
+  --help                      Show this help
+
+${BOLD}Configuration:${NC}
+  Config file: ${CONFIG_FILE}
+  HA URL:      ${HA_URL}
+  Agent ID:    ${AGENT_ID}
+
+EOF
+}
+
+get_conversation_id() {
+    if [ -f "$CONVERSATION_FILE" ]; then
+        cat "$CONVERSATION_FILE"
+    else
+        local new_id="01ARZ3NDEKTSV4RRFFQ69G5FAV"
+        echo "$new_id" > "$CONVERSATION_FILE"
+        echo "$new_id"
+    fi
+}
+
+reset_conversation() {
+    if [ -f "$CONVERSATION_FILE" ]; then
+        rm "$CONVERSATION_FILE"
+        echo -e "${GREEN}✓${NC} Conversation reset."
+    else
+        echo -e "${YELLOW}⚠${NC}  No active conversation to reset."
+    fi
+}
+
+show_conversation_id() {
+    local conv_id
+    conv_id=$(get_conversation_id)
+    echo -e "${CYAN}Conversation ID:${NC} ${BOLD}${conv_id}${NC}"
+    if [ -f "$CONVERSATION_FILE" ]; then
+        local created
+        created=$(stat -c %y "$CONVERSATION_FILE" 2>/dev/null || stat -f "%Sm" "$CONVERSATION_FILE" 2>/dev/null || echo "unknown")
+        echo -e "${CYAN}Started:${NC} ${created}"
+    fi
+}
+
+send_message() {
+    local message="$1"
+    local language="${2:-${DEFAULT_LANGUAGE}}"
+    local verbose="${3:-false}"
+
+    local conv_id
+    conv_id=$(get_conversation_id)
+
+    local payload
+    payload=$(printf '{"text": %s, "language": "%s", "agent_id": "%s", "conversation_id": "%s"}' \
+        "$(echo "$message" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read().strip()))')" \
+        "$language" "$AGENT_ID" "$conv_id")
+
+    echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${CYAN}You:${NC} ${BOLD}${message}${NC}"
+    echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+
+    local response
+    response=$(curl -s -X POST "${HA_URL}/api/conversation/process" \
+        -H "Authorization: Bearer ${HA_TOKEN}" \
+        -H "Content-Type: application/json" \
+        -d "$payload")
+
+    if echo "$response" | grep -q '"error"'; then
+        echo -e "${RED}✗ Error:${NC}"
+        echo "$response" | python3 -m json.tool 2>/dev/null || echo "$response"
+        return 1
+    fi
+
+    local response_text
+    response_text=$(echo "$response" | python3 -c \
+        "import sys, json; d=json.load(sys.stdin); print(d.get('response',{}).get('speech',{}).get('plain',{}).get('speech','No response'))" 2>/dev/null)
+
+    if [ "$verbose" = "true" ]; then
+        echo -e "\n${MAGENTA}Full API Response:${NC}"
+        echo "$response" | python3 -m json.tool 2>/dev/null || echo "$response"
+        echo ""
+    fi
+
+    echo -e "${GREEN}Nabu:${NC} ${response_text}"
+
+    local response_type new_conv_id
+    response_type=$(echo "$response" | python3 -c \
+        "import sys,json; d=json.load(sys.stdin); print(d.get('response',{}).get('response_type','unknown'))" 2>/dev/null)
+    new_conv_id=$(echo "$response" | python3 -c \
+        "import sys,json; d=json.load(sys.stdin); print(d.get('conversation_id',''))" 2>/dev/null)
+
+    if [ -n "$new_conv_id" ]; then
+        echo "$new_conv_id" > "$CONVERSATION_FILE"
+    fi
+
+    echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${CYAN}Type:${NC} ${response_type} ${CYAN}| ID:${NC} ${new_conv_id}"
+    echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+}
+
+main() {
+    local message="" language="${DEFAULT_LANGUAGE}" verbose=false
+
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            --help|-h) show_usage; exit 0 ;;
+            --reset) reset_conversation; exit 0 ;;
+            --show-id) show_conversation_id; exit 0 ;;
+            --lang) language="$2"; shift 2 ;;
+            --verbose|-v) verbose=true; shift ;;
+            *) message="${message:+$message }$1"; shift ;;
+        esac
+    done
+
+    if [ -z "$message" ]; then
+        echo -e "${RED}Error:${NC} No message provided."
+        echo ""
+        show_usage
+        exit 1
+    fi
+
+    send_message "$message" "$language" "$verbose"
+}
+
+main "$@"
