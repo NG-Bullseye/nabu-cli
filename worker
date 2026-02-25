@@ -1,13 +1,25 @@
 #!/bin/bash
-# WORKER - tmux session manager for NABU
-# Attaches to existing 'nabu' tmux session or creates a new one
+SESSION="worker"
 
-SESSION_NAME="nabu"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CONFIG_FILE="${NABU_CONFIG:-$SCRIPT_DIR/config}"
 
-if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
-    echo "Connecting to existing tmux session: $SESSION_NAME"
-    tmux attach-session -t "$SESSION_NAME"
+if [ ! -f "$CONFIG_FILE" ]; then
+    echo "Error: config not found at $CONFIG_FILE"
+    echo "Run setup.sh first, or copy config.example to config."
+    exit 1
+fi
+
+source "$CONFIG_FILE"
+
+# Already inside tmux → just run claude directly (avoid nested tmux)
+if [ -n "$TMUX" ]; then
+    cd "$WORK_DIR" && claude --resume "$WORKER_SESSION_ID"
+    exit 0
+fi
+
+if tmux has-session -t "$SESSION" 2>/dev/null; then
+    tmux attach-session -t "$SESSION"
 else
-    echo "Creating new tmux session: $SESSION_NAME"
-    tmux new-session -s "$SESSION_NAME"
+    tmux new-session -s "$SESSION" -c "$WORK_DIR" \; send-keys "claude --resume $WORKER_SESSION_ID" Enter
 fi

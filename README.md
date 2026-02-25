@@ -1,11 +1,11 @@
 # nabu-cli
 
-CLI for the Home Assistant Conversation Agent — send messages, maintain conversation context, view logs.
+CLI tools to connect to persistent Claude Code sessions via tmux.
 
-## Tools
+- **`nabu`** — attaches to / creates tmux session `nabu`, resumes Claude Code session
+- **`worker`** — attaches to / creates tmux session `worker`, resumes Claude Code session
 
-- **`nabu`** — Talk to the HA conversation agent from the terminal
-- **`worker`** — Attach to / create a persistent tmux session named `nabu`
+Both handle nested tmux: if already inside tmux, claude runs directly without creating a new session.
 
 ## Setup
 
@@ -16,34 +16,20 @@ bash setup.sh
 ```
 
 `setup.sh` asks for:
-- Home Assistant URL
-- Long-lived Access Token
-- Conversation Agent ID
-- Default language
-- Conversation ID (optional — to continue an existing session)
+- Claude Code session ID for `nabu`
+- Claude Code session ID for `worker`
+- Working directory (where claude runs)
 
-Get the current conversation ID on the HA host:
-```bash
-nabu --show-id
-```
-
-Credentials stay in a local `config` file (git-ignored).
+Session IDs stay in a local `config` file (git-ignored).
 
 ## Usage
 
 ```bash
-nabu "Hi was geht?"
-nabu "turn on the lights"
-nabu --reset              # start new conversation
-nabu --show-id            # show current conversation ID
-nabu --logs               # tail HA log filtered to conversation lines
-nabu --lang en "Hello"
-nabu --verbose "test"     # show full API response
-
-worker                    # attach to / create tmux session 'nabu'
+nabu      # attach to 'nabu' tmux session (or create it) + claude --resume <id>
+worker    # attach to 'worker' tmux session (or create it) + claude --resume <id>
 ```
 
 ## Requirements
 
-- `bash`, `curl`, `python3`
-- `tmux` (for `worker`)
+- `bash`, `tmux`
+- `claude` CLI installed
